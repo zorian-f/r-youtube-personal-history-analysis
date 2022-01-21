@@ -16,8 +16,29 @@ library(ggthemes)
 library(plotly)
 library(kableExtra)
 
+# SET THE NUMBER OF REQUESTS YOU WANT TO MAKE TO THE YOUTUBE API
+# DAILY QUOTA FOR THE YOUTUBE API IS 10000
+# IF YOUR NUMBER OF REQUESTS EXCEEDS 10000 YOU CAN JUST RERUN THE SCRIPT THE NEXT DAY
+# TILL YOU GET ALL YOUR DATA ANALYSED, THE SCRIPT SAVES ALLREADY LOADED METADATA
+
+requestNumber <- 9000
+
+# PUT URL HERE "C:\\Users\\ ..."
+SearchHistoryUrl <- ""
+watchHistoryUrl <- ""
+
+# IF YOU WANT TO RERUN THE SCRIPT MULTIPLE TIMES YOU CAN CHOOSE TO NOT REANALYZE THE TAKEOUT DATA EVERY TIME
+# SAVES YOU SOME TIME
+analyseTakeout <- FALSE
+
+# ESTABLISH API KEY AND CONNECTION
+youtubeAPIKey <- "PUT_YOUR_API_KEYHERE"
+connectionURL <- 'https://www.googleapis.com/youtube/v3/videos'
+
+if(analyseTakeout) 
+{
 # READ SEARCH HISTORY
-youtubeSearchHistory <- read_html("Takeout/YouTube and YouTube Music/history/search-history.html")
+youtubeSearchHistory <- read_html(SearchHistoryUrl)
 
 # SCRAPING SEARCH HISTORY
 youtubeSearch <- youtubeSearchHistory %>%
@@ -28,7 +49,7 @@ youtubeSearch <- youtubeSearchHistory %>%
 youtubeSearchContent <- youtubeSearchHistory %>%
   html_nodes(".header-cell + .content-cell")
 youtubeSearchTimeStr <- str_match(youtubeSearchContent, "<br>(.*?)</div>")[,2]
-youtubeSearchTime <- mdy_hms(youtubeSearchTimeStr)
+youtubeSearchTime <- dmy_hms(youtubeSearchTimeStr)
 
 
 # CREATING DATA FRAME SEARCH + TIMESTAMP
@@ -36,18 +57,15 @@ youtubeSearchDataFrame <- data.frame(search = youtubeSearch,
                                      time = youtubeSearchTime,
                                      stringsAsFactors = FALSE)
 
-head(youtubeSearchDataFrame)
-
-
 # READ WATCH HISTORY 
-watchHistory <- read_html("Takeout/YouTube and YouTube Music/history/watch-history.html")
+watchHistory <- read_html(watchHistoryUrl)
 
 watchedVideoContent <-  watchHistory %>%
   html_nodes(".header-cell + .content-cell")
 
 # POSSIBLE TIME CHARACTERS
 watchVideoTimes <- str_match(watchedVideoContent, 
-                             "<br>([A-Z].*)</div>")[,2]
+                             "</a><br>(.*?)</div>")[,2]
 
 # POSSIBLE ID VALUES 
 watchedVideoIDs <- str_match(watchedVideoContent, 
@@ -63,45 +81,16 @@ watchedVideosDataFrame <- data.frame(id = watchedVideoIDs,
                                      scrapedTime = watchVideoTimes, 
                                      stringsAsFactors = FALSE)
 
-watchedVideosDataFrame$time <- mdy_hms(watchedVideosDataFrame$scrapedTime)
-head(watchedVideosDataFrame)
+watchedVideosDataFrame$time <- dmy_hms(watchedVideosDataFrame$scrapedTime)
 
-# ESTABLISH API KEY AND CONNECTION
-youtubeAPIKey <- "HERE_YOUR_API_KEY"
-connectionURL <- 'https://www.googleapis.com/youtube/v3/videos'
-
-# TRYIING QUERY RESPONSE
-videoID <- "SG2pDkdu5kE"
-queryParams <- list()
-queryResponse <- GET(connectionURL,
-                     query = list(
-                       key = youtubeAPIKey,
-                       id = videoID,
-                       fields = "items(id,snippet(channelId,title,categoryId))",
-                       part = "snippet"
-                     ))
-parsedData <- content(queryResponse, "parsed")
-str(parsedData)
-
-
-# REQUESTS OPTIONS
-testConnection <- "https://www.google.com/"
-testCount <- 100
-
-# HTTR TEST
-system.time(for(i in 1:testCount){ 
-  result <- GET(testConnection)
-})
-
-# RCURL Test
-uris = rep(testConnection, testCount)
-system.time(txt <-  getURIAsynchronous(uris))
-
-# CURL TEST
-pool <- new_pool()
-for(i in 1:testCount){curl_fetch_multi(testConnection)}
-system.time(out <- multi_run(pool = pool))
-
+# LOCALY SAVE ANALYSED DATA
+save(youtubeSearchDataFrame, file = "C:\\youtubeSearchDataFrame.RData")
+save(watchedVideosDataFrame, file = "C:\\watchedVideosDataFrame.RData")
+}
+{
+load("C:\\youtubeSearchDataFrame.RData")
+load("C:\\watchedVideosDataFrame.RData")
+}
 
 # CREATE REQUEST AND REMOVE DUPLICATES
 createRequest  <- function(id){
@@ -112,7 +101,16 @@ createRequest  <- function(id){
          "&part=","snippet")
 }
 uniqueWatchedVideoIDs <- unique(watchedVideosDataFrame$id)
+
+
+# GET LOCALY SAVED META
+allreadyLoadedMeta <- read.csv("C:\\allreadyLoadedMeta.csv")
+allreadyLoadedMeta <- distinct(allreadyLoadedMeta)
+
+# ONLY CREATES A REQUEST FOR VIDEOIDS WHICH ARENT ALLREADY LOADED
+uniqueWatchedVideoIDs <- setdiff(uniqueWatchedVideoIDs, allreadyLoadedMeta$id)
 requests <- pblapply(uniqueWatchedVideoIDs, createRequest )
+
 
 # PARSE OUT RESPONSE
 getMetadataDataFrame <- function(response){
@@ -148,9 +146,13 @@ system.time(out <- multi_run(pool = pool))
 saveRDS(videoMetadataDataFrame, file = "videoMetadataDataframeAsync1.rds")
 
 length(requests)
-nrow(videoMetadataDataFrame)
 
-listMetadata <- pblapply(requests, fetchMetadataFromMemory)
+listMetadata <- pblapply(requests[1:requestNumber], fetchMetadataFromMemory)
+allreadyLoadedMeta <- rbind(allreadyLoadedMeta, bind_rows(listMetadata))
+
+#SAVE METADATA TO DISK
+write.csv(allreadyLoadedMeta, file="C:\\allreadyLoadedMeta.csv", row.names = FALSE)
+listMetadata <- allreadyLoadedMeta
 
 # COMBINE LIST INTO A DATA FRAME
 videoMetadataDataFrame <- bind_rows(listMetadata)
@@ -162,7 +164,7 @@ categoryListURL <- "https://www.googleapis.com/youtube/v3/videoCategories"
 categoryResponse <- GET(url = categoryListURL,
                          query = list(
                            key = youtubeAPIKey,
-                           regionCode = "us",
+                           regionCode = "de",
                            part = "snippet"
                          ))
 parsedCategoryResponse <- content(categoryResponse, "parsed")
@@ -176,14 +178,13 @@ for(item in parsedCategoryResponse$items){
 
 categoryDataFrame
 videoMetadata <- merge(x = videoMetadataDataFrame, y = categoryDataFrame, by = "categoryId")
-head(videoMetadata)
 
 # COMBINE WITH WATCH HISTORY
 watchedVideos <- merge(watchedVideosDataFrame , videoMetadata, by="id")
-str(watchedVideos)
+write.csv(bind_rows(watchedVideos), file="C:\\watchedVideos.csv", row.names = FALSE)
 
 # VISUALIZE VIDEO CATEGORIES WATCHED 
-watchedVideos %>% 
+watchedVideos%>% 
   group_by(category) %>% 
   summarise(count = n()) %>% 
   arrange(desc(count))
@@ -192,8 +193,9 @@ watchedVideos %>%
   ggplot(aes(x = time, fill = category)) + 
   labs(x= "Year", y= "Count") + 
   ggtitle("How much have your genre tastes changed over time?", "Most played categories")+
-  geom_area(stat = "bin") + 
-  theme_economist_white()
+  geom_area(bins= 40,stat = "bin",position = "fill") + 
+  theme_economist_white()+
+  scale_y_continuous(labels = scales::percent)
 
 ggplotly()
 
@@ -254,8 +256,8 @@ myWordcloud <- myWords %>%
   summarize(count = sum(n)) %>%
   anti_join(stop_words)
 
-wordcloud(words = myWordcloud$word, freq = myWordcloud$count, min.freq = 25, 
-          max.words = 100, random.order =FALSE, rot.per =.35,
+wordcloud(words = myWordcloud$word, freq = myWordcloud$count, min.freq = 10, 
+          max.words = 200, random.order =FALSE, rot.per =.35,
           colors=brewer.pal(9, "Set1"))
 
 # WORDCLOUD MOST FREQUENT WORDS IN VIDEO DESCRIPTIONS
@@ -263,14 +265,7 @@ descriptionsWordcloud <- watchedVideos %>%
   unnest_tokens(word, description) %>%
   anti_join(stop_words) %>%
   count(word, sort = TRUE) %>%
-  filter(! word %in% c("www.instagram.com", "gmail.com", "www.twitter.com", "youtu.be", "como", "instagram", "instagram.com", "tú", "watch", "aquí", "pero", "su", "http", "al","se","si","goo.gl","smarturl.it","facebook","video","más", "twitter", "te","lo","este","tu", "para", "por", "con", "es", "del", "las", "una", "mi", "de", "en", "la", "el", "los", "https", "bit.ly" , "â", "www.youtube.com")) %>%
+  filter(! word %in% c("www.instagram.com", "gmail.com", "www.twitter.com", "youtu.be", "como", "instagram", "instagram.com", "tÃº", "watch", "aquÃ­", "pero", "su", "http", "al","se","si","goo.gl","smarturl.it","facebook","video","mÃ¡s", "twitter", "te","lo","este","tu", "para", "por", "con", "es", "del", "las", "una", "mi", "de", "en", "la", "el", "los", "https", "bit.ly" , "Ã¢", "www.youtube.com")) %>%
   filter(n > 250)
 
 wordcloud2(descriptionsWordcloud)
-
-
-
-
-
-
-
